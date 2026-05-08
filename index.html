@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>EXIF Frame</title>
   <link rel="stylesheet" href="css/style.css">
-  <script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
 </head>
 <body>
   <div class="app">
@@ -14,12 +13,23 @@
       <p>写真にEXIF情報入りのフレームを付与</p>
     </header>
 
-    <!-- Drop Zone -->
-    <div id="drop-zone" class="drop-zone">
-      <div class="drop-zone-icon">📷</div>
-      <div class="drop-zone-text"><strong>ドラッグ&ドロップ</strong>または<strong>クリック</strong>で画像を選択</div>
-      <div class="drop-zone-hint">JPEG / PNG / HEIC · 最大50MB</div>
-      <input type="file" id="file-input" accept="image/jpeg,image/png,image/heic,image/heif,.jpg,.jpeg,.png,.heic,.heif" hidden>
+    <!-- Drop Zones (initial state) -->
+    <div id="dropzones" class="dropzones-wrapper">
+      <div class="dropzones">
+        <div class="drop-zone" id="jpeg-drop-zone">
+          <div class="drop-zone-icon">📷</div>
+          <div class="drop-zone-text"><strong>JPEG をドロップ</strong> <span class="optional">(任意)</span></div>
+          <div class="drop-zone-hint">フレーム付与する写真 · 最大50MB</div>
+          <input type="file" id="jpeg-file-input" accept="image/jpeg,image/png,image/heic,image/heif,.jpg,.jpeg,.png,.heic,.heif" hidden>
+        </div>
+        <div class="drop-zone" id="raw-drop-zone">
+          <div class="drop-zone-icon">📄</div>
+          <div class="drop-zone-text"><strong>RAW をドロップ</strong> <span class="optional">(任意)</span></div>
+          <div class="drop-zone-hint">EXIFソース・撮って出し用 · ARW/CR3/NEF/RAF/DNG · 最大200MB</div>
+          <input type="file" id="raw-file-input" accept=".arw,.cr3,.cr2,.nef,.raf,.dng,.rw2,.orf,.pef,.srw" hidden>
+        </div>
+      </div>
+      <div class="dropzones-hint">少なくともどちらか一方を読み込んでください</div>
     </div>
 
     <!-- Preview & Edit -->
@@ -29,52 +39,112 @@
         <canvas id="preview-canvas"></canvas>
       </div>
 
+      <!-- Loaded file status -->
+      <div id="file-status" class="file-status">
+        <div class="file-row" id="jpeg-row">
+          <span class="file-icon">📷</span>
+          <span class="file-name placeholder" id="jpeg-file-name">JPEG未選択</span>
+          <button class="file-btn" id="jpeg-pick-btn">選択</button>
+          <button class="file-btn file-btn-danger hidden" id="jpeg-remove-btn">削除</button>
+        </div>
+        <div class="file-row" id="raw-row">
+          <span class="file-icon">📄</span>
+          <span class="file-name placeholder" id="raw-file-name">RAW未選択</span>
+          <button class="file-btn" id="raw-pick-btn">選択</button>
+          <button class="file-btn file-btn-danger hidden" id="raw-remove-btn">削除</button>
+        </div>
+        <div class="status-info">
+          <div class="status-line" id="display-source-label"></div>
+          <div class="status-line" id="exif-source-label"></div>
+          <div class="status-hint" id="status-hint"></div>
+        </div>
+      </div>
+
       <!-- Template Selector -->
       <div class="template-selector">
         <label>テンプレート</label>
         <button class="template-btn active" data-template="minimal-white">Minimal White</button>
-        <button class="template-btn" data-template="black-cinematic">Black Cinematic</button>
-        <button class="template-btn" data-template="side-strip">Side Strip</button>
+        <button class="template-btn" data-template="black-bar">Black Bar</button>
+        <button class="template-btn" data-template="gray-bar">Gray Bar</button>
+        <button class="template-btn" data-template="gallery-frame">Gallery Frame</button>
+        <button class="template-btn" data-template="dark-cinematic">Dark Cinematic</button>
+        <button class="template-btn" data-template="info-card">Info Card</button>
+        <button class="template-btn" data-template="elegant-dark">Elegant Dark</button>
+        <button class="template-btn" data-template="overlay">Overlay</button>
+        <button class="template-btn" data-template="photo-overlay">Photo Overlay</button>
+        <button class="template-btn" data-template="polaroid-card">Polaroid Card</button>
+        <button class="template-btn" data-template="custom">Custom</button>
       </div>
 
-      <!-- Metadata Form -->
-      <div id="metadata-form" class="metadata-form">
+      <!-- Custom-only controls -->
+      <div id="custom-controls" class="custom-controls hidden">
         <div class="form-group">
-          <label for="camera">カメラ</label>
-          <input type="text" id="camera" placeholder="Sony α7 V">
-        </div>
-        <div class="form-group">
-          <label for="lens">レンズ</label>
-          <input type="text" id="lens" placeholder="Tamron 25-200mm F2.8-5.6">
-        </div>
-        <div class="form-group">
-          <label for="focalLength">焦点距離</label>
-          <input type="text" id="focalLength" placeholder="146mm">
+          <label for="customFrame">枠</label>
+          <select id="customFrame">
+            <option value="none" selected>なし</option>
+            <option value="white">白</option>
+            <option value="black">黒</option>
+            <option value="gray">グレー</option>
+            <option value="blur">ブラー</option>
+          </select>
         </div>
         <div class="form-group">
-          <label for="aperture">F値</label>
-          <input type="text" id="aperture" placeholder="f/5.6">
+          <label for="customBar">バー</label>
+          <select id="customBar">
+            <option value="none">なし</option>
+            <option value="white" selected>白</option>
+            <option value="black">黒</option>
+            <option value="gray">グレー</option>
+            <option value="blur">ブラー</option>
+          </select>
         </div>
         <div class="form-group">
-          <label for="shutter">シャッター速度</label>
-          <input type="text" id="shutter" placeholder="1/160s">
+          <label for="cornerRadius">角丸クロップ</label>
+          <select id="cornerRadius">
+            <option value="none" selected>なし</option>
+            <option value="small">小</option>
+            <option value="medium">中</option>
+            <option value="large">大</option>
+          </select>
         </div>
-        <div class="form-group">
-          <label for="iso">ISO</label>
-          <input type="text" id="iso" placeholder="ISO 640">
+      </div>
+
+      <!-- Metadata Form (rows generated dynamically) -->
+      <div id="metadata-form" class="metadata-form"></div>
+
+      <!-- Brand logo (always editable, separate from rows) -->
+      <div class="logo-row">
+        <label for="logo">ブランドロゴ</label>
+        <select id="logo">
+          <option value="none">なし (テキストのみ)</option>
+          <option value="sony-alpha" selected>Sony α</option>
+          <option value="sony">SONY</option>
+        </select>
+        <label class="logo-show">
+          <input type="checkbox" id="show_logo" checked> 画像に表示
+        </label>
+      </div>
+
+      <!-- Editing software (manual selection — EXIF Software is camera FW, useless) -->
+      <div class="logo-row software-row">
+        <label for="software">現像ソフト</label>
+        <div class="software-controls">
+          <select id="software">
+            <option value="">なし (表示しない)</option>
+            <option value="DaVinci Resolve">DaVinci Resolve</option>
+            <option value="Adobe Lightroom">Adobe Lightroom</option>
+            <option value="Adobe Photoshop">Adobe Photoshop</option>
+            <option value="Capture One">Capture One</option>
+            <option value="Sony Imaging Edge">Sony Imaging Edge</option>
+            <option value="Darktable">Darktable</option>
+            <option value="RawTherapee">RawTherapee</option>
+            <option value="other">その他...</option>
+          </select>
+          <input type="text" id="softwareCustom" class="hidden" placeholder="ソフト名を入力">
         </div>
-        <div class="form-group">
-          <label for="date">撮影日</label>
-          <input type="date" id="date">
-        </div>
-        <div class="form-group">
-          <label for="location">撮影地</label>
-          <input type="text" id="location" placeholder="任意">
-        </div>
-        <div class="form-group full-width">
-          <label for="author">著者名</label>
-          <input type="text" id="author" placeholder="NISHIMURA" value="NISHIMURA">
-        </div>
+        <label class="logo-show">
+          <input type="checkbox" id="show_software"> 画像に表示
+        </label>
       </div>
 
       <!-- Actions -->
@@ -83,6 +153,11 @@
         <button id="export-btn" class="btn btn-primary">書き出し</button>
       </div>
     </div>
+  </div>
+
+  <!-- Persistent ExifTool WASM status badge -->
+  <div id="exiftool-status" class="exiftool-status loading" title="EXIFタグ抽出エンジン">
+    <span id="exiftool-status-text">ExifTool 読み込み中…</span>
   </div>
 
   <script type="module" src="js/main.js"></script>
