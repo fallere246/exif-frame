@@ -1,8 +1,14 @@
 // Template Definitions and Canvas Rendering
-import { drawLogo as drawLogoImage } from './logos.js';
+import { drawLogo as drawLogoImage, getLogoAspect } from './logos.js';
 import { FIELDS, SLOT_LIMITS, SLOTS } from './fields.js';
 
-const FONT_STACK = '-apple-system, "SF Pro Display", "Inter", "Segoe UI", "Roboto", sans-serif';
+// Sans is the workhorse — Noto Sans + Noto Sans JP keep latin and Japanese
+// glyphs metrically aligned. Mono is reserved for camera parameters where
+// tabular alignment matters (f/5.6 · 1/160s · ISO 640).
+const FONT_SANS = '"Noto Sans", "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif';
+const FONT_MONO = '"SF Mono", Menlo, Consolas, "Noto Sans JP", monospace';
+// Legacy alias retained — older templates still reference FONT_STACK.
+const FONT_STACK = FONT_SANS;
 
 function fontSize(baseHeight, ratio) {
   return Math.max(Math.round(baseHeight * ratio), 12);
@@ -74,87 +80,152 @@ function drawImageMaybeRounded(ctx, img, meta, x, y, w, h, bgFill) {
   }
 }
 
-// Build the joined string for one slot from currently-checked fields,
-// respecting per-slot caps. Author gets a © prefix; date is reformatted.
-function slotText(meta, slot, separator) {
-  const taken = [];
+// Editorial-style bar layout. Left=brand+camera info, right=date/meta stack.
+// Content is driven by the FIELDS slot system so the user's "表示" toggles
+// continue to control what appears.
+//
+//   LEFT_TOP  → first text line (sans, primary)            "α7 V · Tamron 25-200mm"
+//   LEFT_BOTTOM → second text line (mono, tabular)         "146mm · f/5.6 · 1/160s · ISO 640"
+//   RIGHT_TOP → first right-side line (sans, primary)      "May 3, 2026 · Tokyo"
+//   RIGHT_BOTTOM → each item on its own meta line below    "© 2026 NISHIMURA, Sota"
+//                                                          "DaVinci Resolve"
+
+function slotItems(meta, slot) {
+  const items = [];
   for (const f of FIELDS) {
     if (f.slot !== slot) continue;
     if (!meta['show_' + f.id]) continue;
     let v = meta[f.id];
     if (!v) continue;
     if (f.id === 'date') v = formatDate(v);
-    if (f.id === 'author') v = `©  ${v}`;
-    if (f.id === 'copyright' && !v.includes('©')) v = `©  ${v}`;
-    taken.push(v);
-    if (taken.length >= SLOT_LIMITS[slot]) break;
+    if (f.id === 'author') v = `© ${v}`;
+    if (f.id === 'copyright' && !v.includes('©')) v = `© ${v}`;
+    items.push(v);
+    if (items.length >= SLOT_LIMITS[slot]) break;
   }
-  return taken.join(separator);
+  return items;
 }
 
-// Unified bar text layout used by all bar-containing templates.
-// style: 'white' | 'black' | 'gray' | 'blur'
-// Layout: LEFT=top/bottom slots, CENTER=brand logo, RIGHT=top/bottom slots
+function barColors(style) {
+  if (style === 'white') {
+    return { main: '#1a1a1a', secondary: '#888888', meta: '#aaaaaa', metaSoft: '#bbbbbb', brand: '#1a1a1a' };
+  }
+  if (style === 'gray') {
+    return { main: '#ffffff', secondary: '#dddddd', meta: '#aaaaaa', metaSoft: '#999999', brand: '#ffffff' };
+  }
+  // black, blur
+  return { main: '#ffffff', secondary: '#cccccc', meta: '#999999', metaSoft: '#888888', brand: '#ffffff' };
+}
+
 function drawBarContent(ctx, img, meta, x, y, w, h, style) {
   const imgH = img.naturalHeight;
-  let colors;
-  if (style === 'white') {
-    colors = { main: '#1a1a1a', sub: '#777777', brand: '#1a1a1a' };
-  } else if (style === 'gray') {
-    colors = { main: '#ffffff', sub: '#aaaaaa', brand: '#ffffff' };
-  } else {
-    colors = { main: '#ffffff', sub: '#bbbbbb', brand: '#ffffff' };
-  }
+  const colors = barColors(style);
 
-  const pad = Math.round(h * 0.18);
-  const mainSize = fontSize(imgH, 0.024);
-  const subSize = fontSize(imgH, 0.018);
-  const brandSize = fontSize(imgH, 0.034);
-
-  const midY = y + h / 2;
-  const rowGap = mainSize * 0.85;
-  const topY = midY - rowGap;
-  const botY = midY + rowGap;
-  const centerX = x + w / 2;
+  // Sizes — design pixel values (13/11/10) × 2 for SNS-frame legibility,
+  // interpreted as ratios of imgH so they scale to any resolution.
+  const padH = Math.round(imgH * 0.030);
+  const padV = Math.round(imgH * 0.020);
+  const logoH = Math.max(Math.round(imgH * 0.036), 20);
+  const mainSize = fontSize(imgH, 0.028);
+  const secSize = fontSize(imgH, 0.022);
+  const metaSize = fontSize(imgH, 0.020);
+  const lineGap = Math.max(Math.round(imgH * 0.010), 4);
 
   ctx.save();
-  ctx.textBaseline = 'middle';
+  ctx.textBaseline = 'top';
+  // Subtle letter-spacing throughout. ctx.letterSpacing supported in modern
+  // browsers (Chrome 99+, Safari 15.4+, Firefox 113+).
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '0.02em';
 
-  // LEFT
-  const leftTop = slotText(meta, SLOTS.LEFT_TOP, '  ·  ');
-  const leftBottom = slotText(meta, SLOTS.LEFT_BOTTOM, '  ');
+  // ── LEFT COLUMN ──
+  // Pulled from FIELDS slot mappings so the user's show_* toggles take effect.
+  const leftTopText = slotItems(meta, SLOTS.LEFT_TOP).join(' · ');
+  const leftBottomText = slotItems(meta, SLOTS.LEFT_BOTTOM).join(' · ');
+
+  const showLogo = meta.show_logo !== false && meta.logo && meta.logo !== 'none';
+
+  const leftLines = [];
+  if (leftTopText) leftLines.push({ text: leftTopText, size: mainSize, color: colors.main, font: FONT_SANS });
+  if (leftBottomText) leftLines.push({ text: leftBottomText, size: secSize, color: colors.secondary, font: FONT_MONO, mono: true });
+
+  const leftTextH = leftLines.length
+    ? leftLines.reduce((s, l) => s + l.size, 0) + (leftLines.length - 1) * lineGap
+    : 0;
+  const leftBlockH = Math.max(showLogo ? logoH : 0, leftTextH);
+  const leftTop = y + (h - leftBlockH) / 2;
+
+  let leftX = x + padH;
+
+  // Logo: vertically centered with the entire left text block (not just the
+  // first line). Aligning to line 1 made it visually float toward the top.
+  if (showLogo) {
+    const aspect = getLogoAspect(meta.logo);
+    const logoW = aspect > 0 ? logoH * aspect : 0;
+    const logoCY = leftTop + leftBlockH / 2;
+    if (logoW > 0) {
+      drawBrand(ctx, meta, leftX + logoW / 2, logoCY, logoH, colors.brand);
+      leftX += logoW + Math.round(padH * 0.85);
+    } else {
+      // text-fallback brand mark — let drawBrand center then advance by its return
+      const w = drawBrand(ctx, meta, leftX, logoCY, logoH, colors.brand);
+      if (w > 0) leftX += w + Math.round(padH * 0.85);
+    }
+  }
+
+  // Stack camera line then params line, vertically aligned to the block top
+  let textY = leftTop + (leftBlockH - leftTextH) / 2;
   ctx.textAlign = 'left';
-  if (leftTop) {
-    ctx.font = `600 ${mainSize}px ${FONT_STACK}`;
-    ctx.fillStyle = colors.main;
-    ctx.fillText(leftTop, x + pad, topY);
-  }
-  if (leftBottom) {
-    ctx.font = `400 ${subSize}px ${FONT_STACK}`;
-    ctx.fillStyle = colors.sub;
-    ctx.fillText(leftBottom, x + pad, botY);
-  }
-
-  // CENTER: brand logo (only if its checkbox is on)
-  if (meta.show_logo !== false) {
-    drawBrand(ctx, meta, centerX, midY, brandSize, colors.brand);
+  for (const line of leftLines) {
+    ctx.font = `400 ${line.size}px ${line.font}`;
+    ctx.fillStyle = line.color;
+    if ('letterSpacing' in ctx) {
+      ctx.letterSpacing = line.mono ? '0.04em' : '0.02em';
+    }
+    if (line.mono && 'fontVariantCaps' in ctx) {
+      // Tabular numerals via OpenType feature — supported in newer Canvas.
+      ctx.font = `400 ${line.size}px ${line.font}`;
+    }
+    ctx.fillText(line.text, leftX, textY);
+    textY += line.size + lineGap;
   }
 
-  // RIGHT
-  const rightTop = slotText(meta, SLOTS.RIGHT_TOP, '   ');
-  const rightBottom = slotText(meta, SLOTS.RIGHT_BOTTOM, '   ');
-  ctx.textAlign = 'right';
-  const rightX = x + w - pad;
-  if (rightTop) {
-    ctx.font = `600 ${mainSize}px ${FONT_STACK}`;
-    ctx.fillStyle = colors.main;
-    ctx.fillText(rightTop, rightX, topY);
+  // ── RIGHT COLUMN ──
+  // RIGHT_TOP fields share one joined line (date · location · …); RIGHT_BOTTOM
+  // fields each get their own meta line below.
+  const rightTopText = slotItems(meta, SLOTS.RIGHT_TOP).join(' · ');
+  const rightStackItems = slotItems(meta, SLOTS.RIGHT_BOTTOM);
+
+  const rightLines = [];
+  if (rightTopText) {
+    rightLines.push({ text: rightTopText, size: mainSize, color: colors.main });
   }
-  if (rightBottom) {
-    ctx.font = `400 ${subSize}px ${FONT_STACK}`;
-    ctx.fillStyle = colors.sub;
-    ctx.fillText(rightBottom, rightX, botY);
+  rightStackItems.forEach((text, i) => {
+    // Slight progressive de-emphasis when there are several stacked metas.
+    const color = i === rightStackItems.length - 1 ? colors.metaSoft : colors.meta;
+    rightLines.push({ text, size: metaSize, color });
+  });
+
+  if (rightLines.length) {
+    const rightX = x + w - padH;
+    const rightTextH = rightLines.reduce((s, l) => s + l.size, 0) + (rightLines.length - 1) * lineGap;
+    let rTextY = y + (h - rightTextH) / 2;
+    // Top-align the right column with the left's first line for visual rhyme.
+    if (leftLines.length) {
+      const leftFirstLineTop = leftTop + (leftBlockH - leftTextH) / 2;
+      rTextY = leftFirstLineTop;
+    }
+    ctx.textAlign = 'right';
+    for (const line of rightLines) {
+      ctx.font = `400 ${line.size}px ${FONT_SANS}`;
+      ctx.fillStyle = line.color;
+      if ('letterSpacing' in ctx) ctx.letterSpacing = '0.02em';
+      ctx.fillText(line.text, rightX, rTextY);
+      rTextY += line.size + lineGap;
+    }
   }
+
+  // Suppress unused-var warning for padV (kept as design hint for callers).
+  void padV;
 
   ctx.restore();
 }
@@ -657,7 +728,7 @@ export function getCanvasDimensions(img, templateId, meta = {}) {
     const frame = meta.customFrame || 'none';
     const bar = meta.customBar || 'none';
     const framePad = frame === 'none' ? 0 : Math.round(Math.min(w, h) * 0.04);
-    const barH = bar === 'none' ? 0 : Math.round(h * 0.12);
+    const barH = bar === 'none' ? 0 : Math.round(h * 0.13);
     const bottomFramePad = frame === 'none' ? 0 : framePad;
     return {
       width: w + framePad * 2,
@@ -680,7 +751,7 @@ export function getCanvasDimensions(img, templateId, meta = {}) {
     // White card with drop shadow + bottom info area
     const shadowMargin = Math.round(Math.min(w, h) * 0.03);
     const cardPad = Math.round(Math.min(w, h) * 0.04);
-    const bottomH = Math.round(h * 0.18);
+    const bottomH = Math.round(h * 0.16);
     return {
       width: w + cardPad * 2 + shadowMargin * 2,
       height: h + cardPad + bottomH + shadowMargin * 2,
@@ -697,7 +768,7 @@ export function getCanvasDimensions(img, templateId, meta = {}) {
   if (templateId === 'gallery-frame' || templateId === 'elegant-dark') {
     // Padding all around + bottom info area
     const padding = Math.round(Math.min(w, h) * 0.05);
-    const bottomExtra = Math.round(h * 0.18);
+    const bottomExtra = Math.round(h * 0.16);
     return {
       width: w + padding * 2,
       height: h + padding * 2 + bottomExtra,
@@ -708,7 +779,7 @@ export function getCanvasDimensions(img, templateId, meta = {}) {
   if (templateId === 'dark-cinematic') {
     // Dark frame with inset image + bottom info
     const imgPad = Math.round(w * 0.03);
-    const bottomExtra = Math.round(h * 0.20);
+    const bottomExtra = Math.round(h * 0.17);
     return {
       width: w + imgPad * 2,
       height: h + imgPad + bottomExtra,
@@ -717,6 +788,6 @@ export function getCanvasDimensions(img, templateId, meta = {}) {
   }
 
   // Bottom bar templates (minimal-white, black-bar, gray-bar)
-  const frameH = Math.round(h * 0.12);
+  const frameH = Math.round(h * 0.13);
   return { width: w, height: h + frameH, extra: frameH };
 }

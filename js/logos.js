@@ -56,5 +56,12 @@ export function drawLogo(ctx, logoKey, cx, cy, height, color) {
   return w;
 }
 
+// Width of a logo at a given draw height — needed so callers can left-align
+// without a measure-then-draw round trip.
+export function getLogoAspect(logoKey) {
+  const def = LOGO_DEFS[logoKey];
+  return def ? def.aspect : 0;
+}
+
 // Initialize on module load
 preloadLogos();

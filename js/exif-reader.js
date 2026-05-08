@@ -1,16 +1,42 @@
-// EXIF Reader — uses @uswriting/exiftool (WebAssembly ExifTool 13.42)
+// EXIF Reader — uses exifr (https://github.com/MikeKovarik/exifr).
 //
-// Why ExifTool over exifr: Resolve-exported JPEGs corrupt FNumber and drop
-// LensModel; exifr inherits those gaps. Real ExifTool reads every tag the
-// camera/Resolve actually wrote, so we get accurate f-stop and lens names
-// from the ARW.
+// Why exifr over @uswriting/exiftool: empirical testing on Sony ARW showed
+// exifr ~5ms / file vs ExifTool WASM ~700ms, with more accurate results
+// (ExifTool WASM had bugs producing ExposureTime=Bulb, FocalLength=25.9mm,
+// and a thinned-out Sony lens dictionary). MakerNote-only fields like
+// CreativeStyle/PictureProfile were unreliable on the WASM build and are
+// not displayed in this app.
 
+import exifr from 'https://esm.sh/exifr@7.1.3';
+
+// ─── ExifTool WASM (lazy, only for RAW preview extraction) ───────────────
+//
+// EXIF tag reading happens entirely in exifr (fast, accurate). ExifTool WASM
+// is loaded only when we need to pull an embedded high-resolution preview JPEG
+// from a RAW file (`-b -JpgFromRaw` etc.) — exifr's public thumbnail() returns
+// only the small ~160×120 IFD1 thumbnail.
+//
+// First RAW load pays the WASM init cost (~2-5s). Subsequent loads in the same
+// session reuse the in-memory module; subsequent visits hit the browser HTTP
+// cache for the CDN bundles (esm.sh sets long max-age), so re-fetching is fast.
+
+// 1.0.9 has a separate zeroperl-ts dependency that fetches "./zeroperl.wasm"
+// against the page origin (404 on our deploy). We redirect via patchedFetch.
+// Kept on 1.0.9 because the committed reference implementation that handled
+// these previews was on this version.
 const EXIFTOOL_CDN = 'https://esm.sh/@uswriting/exiftool@1.0.9';
-// zeroperl-ts 1.0.10 fetches "./zeroperl.wasm" with no base URL — in the
-// browser that resolves to the page origin (404). We redirect that one
-// request to the CDN copy via a custom fetch passed to parseMetadata.
 const ZEROPERL_WASM_URL = 'https://esm.sh/@6over3/zeroperl-ts@1.0.10/dist/esm/zeroperl.wasm';
 
+let exiftoolPromise = null;
+function getExiftool() {
+  if (!exiftoolPromise) {
+    exiftoolPromise = import(/* @vite-ignore */ EXIFTOOL_CDN);
+  }
+  return exiftoolPromise;
+}
+
+// zeroperl-ts resolves "./zeroperl.wasm" against the page origin, which 404s
+// when loaded via CDN. Patch the fetch zeroperl uses to redirect that one URL.
 function patchedFetch(input, init) {
   let url;
   if (typeof input === 'string') url = input;
@@ -23,58 +49,17 @@ function patchedFetch(input, init) {
   return globalThis.fetch(input, init);
 }
 
-// Always include `fetch: patchedFetch` so zeroperl picks it up on first WASM load.
-function withPatchedFetch(options = {}) {
-  return { ...options, fetch: patchedFetch };
+// Optional caller-provided lifecycle hook so the UI can display a message
+// during WASM init (which is the slow part).
+let processingListener = null;
+export function onPreviewProcessing(fn) {
+  processingListener = fn;
+  return () => { if (processingListener === fn) processingListener = null; };
 }
-
-// Lazy-loaded module + warmup. Started by readyPromise() at boot.
-let exiftoolModulePromise = null;
-let readyState = 'pending'; // 'pending' | 'ready' | 'error'
-let readyError = null;
-const readyListeners = new Set();
-
-export function getReadyState() { return readyState; }
-export function getReadyError() { return readyError; }
-
-export function onReadyStateChange(fn) {
-  readyListeners.add(fn);
-  return () => readyListeners.delete(fn);
-}
-
-function setReadyState(state, err = null) {
-  readyState = state;
-  readyError = err;
-  for (const fn of readyListeners) {
-    try { fn(state, err); } catch { /* ignore */ }
+function emitProcessing(state) {
+  if (processingListener) {
+    try { processingListener(state); } catch { /* ignore */ }
   }
-}
-
-// Begin WASM init in the background. Idempotent.
-//
-// Note: we used to do a "-ver" warmup against a 1-byte blob, but that left the
-// embedded Perl interpreter in a corrupt state (subsequent zeroperl_reset crashed
-// with "memory access out of bounds"). Now we just import the module; the first
-// real parseMetadata call performs the WASM init itself.
-export function preloadExiftool() {
-  if (exiftoolModulePromise) return exiftoolModulePromise;
-  exiftoolModulePromise = (async () => {
-    try {
-      const mod = await import(/* @vite-ignore */ EXIFTOOL_CDN);
-      setReadyState('ready');
-      return mod;
-    } catch (err) {
-      console.error('ExifTool preload failed:', err);
-      setReadyState('error', err);
-      throw err;
-    }
-  })();
-  return exiftoolModulePromise;
-}
-
-async function getExiftool() {
-  if (!exiftoolModulePromise) preloadExiftool();
-  return exiftoolModulePromise;
 }
 
 // ─── Format helpers ──────────────────────────────────────────────────────
@@ -90,25 +75,17 @@ const CAMERA_NAME_MAP = {
   'ILCE-9M3': 'Sony α9 III',
 };
 
-// Without -n, ExifTool returns these as descriptive strings — we map them to
-// short codes typical on photo bars. Numeric keys remain as a fallback in case
-// any caller switches back to -n mode.
 const EXPOSURE_PROGRAMS = {
-  // Numeric (-n)
+  // Numeric (raw EXIF)
   1: 'M', 2: 'P', 3: 'Av', 4: 'Tv',
   5: 'Creative', 6: 'Sports', 7: 'Portrait', 8: 'Landscape',
-  // String (default print conversion)
+  // String (in case exifr translates)
   'Manual': 'M',
   'Program AE': 'P',
   'Aperture-priority AE': 'Av',
   'Aperture Priority': 'Av',
   'Shutter speed priority AE': 'Tv',
   'Shutter Priority': 'Tv',
-  'Creative (Slow speed)': 'Creative',
-  'Action (High speed)': 'Sports',
-  'Portrait': 'Portrait',
-  'Landscape': 'Landscape',
-  'Bulb': 'Bulb',
 };
 
 const METERING_MODES = {
@@ -142,70 +119,70 @@ function normalizeCamera(make, model) {
   return model;
 }
 
-// LensType2 / LensType3 carry the marketing name ("Tamron 25-200mm F2.8-5.6 Di III VXD G2");
-// LensModel often holds the SKU-style code ("TAMRON 25-200mm F2.8-5.6 A075 E");
-// LensType (without 2/3) is sometimes a numeric Sony code (e.g. 49479) — skip it.
+function cleanLensName(name) {
+  if (!name) return '';
+  // exifr returns LensInfo as [25, 200, 2.8, 5.6] for variable-aperture zooms
+  if (Array.isArray(name)) return name.join(' ');
+  return name
+    .replace(/\s+[A-Z]\d{3,}\s*[A-Z]?$/, '')  // "A075 E" 等のSKU除去
+    .replace(/^TAMRON/, 'Tamron')
+    .replace(/^SONY/, 'Sony')
+    .trim();
+}
+
+// exifr reliably returns LensModel as a marketing name for most files.
+// For Resolve-stripped JPEGs LensModel may be missing — fall back to LensInfo.
 function pickLens(e) {
-  return e.LensType2 || e.LensType3 || e.LensModel || e.LensSpec || e.LensInfo || '';
+  if (e.LensModel) return cleanLensName(e.LensModel);
+  if (e.LensInfo) return cleanLensName(e.LensInfo);
+  return '';
 }
 
-// Lookup map; if value isn't mapped, pass through the string (so unknown values
-// still display rather than vanish).
-function mapOrPassthrough(map, v) {
-  if (v === undefined || v === null || v === '') return '';
-  if (Object.prototype.hasOwnProperty.call(map, v)) return map[v];
-  return typeof v === 'string' ? v : String(v);
+function getFocalLength(e) {
+  if (e.FocalLength === undefined || e.FocalLength === null) return '';
+  const f = parseFloat(e.FocalLength);
+  if (isNaN(f)) return '';
+  return `${Math.round(f)}mm`;
 }
 
-// Without -n, ExifTool returns "1/160" (string) for fractional shutter and
-// "2.5" for ≥1s. With -n, it's a decimal like 0.00625. Handle all three.
-function formatShutter(t) {
-  if (t === undefined || t === null || t === '') return '';
-  // Already formatted as a fraction "1/160"
-  if (typeof t === 'string' && t.includes('/')) {
-    return t.endsWith('s') ? t : `${t}s`;
-  }
-  // Number or numeric string
-  const n = typeof t === 'string' ? parseFloat(t) : t;
-  if (!Number.isFinite(n) || n <= 0) return '';
-  if (n >= 1) return `${n}s`;
-  return `1/${Math.round(1 / n)}s`;
+function getFocalLength35mm(e) {
+  if (e.FocalLengthIn35mmFormat === undefined || e.FocalLengthIn35mmFormat === null) return '';
+  const f = parseFloat(e.FocalLengthIn35mmFormat);
+  if (isNaN(f)) return '';
+  return `${Math.round(f)}mm`;
 }
 
-// FNumber fallback: Resolve-exported JPEGs drop the FNumber tag and keep
-// only ApertureValue (APEX). f = 2^(AV/2).
-function pickFNumber(e) {
-  const direct = e.FNumber;
-  if (direct !== undefined && direct !== null && direct !== '') {
-    const n = typeof direct === 'string' ? parseFloat(direct) : direct;
-    if (Number.isFinite(n)) return n;
-  }
-  const av = e.ApertureValue ?? e.MaxApertureValue;
-  if (av === undefined || av === null || av === '') return null;
-  const n = typeof av === 'string' ? parseFloat(av) : av;
-  if (!Number.isFinite(n)) return null;
-  return Math.round(Math.pow(2, n / 2) * 10) / 10;
+// exifr returns ExposureTime as seconds (number, e.g. 0.00625 = 1/160s).
+function getShutter(e) {
+  if (e.ExposureTime === undefined || e.ExposureTime === null) return '';
+  const t = parseFloat(e.ExposureTime);
+  if (isNaN(t) || t <= 0) return '';
+  if (t >= 1) return `${t.toFixed(1)}s`;
+  return `1/${Math.round(1 / t)}s`;
 }
 
-// ExposureTime fallback: t = 2^(-SV) when only ShutterSpeedValue (APEX) is present.
-function pickExposureTime(e) {
-  if (e.ExposureTime !== undefined && e.ExposureTime !== null && e.ExposureTime !== '') return e.ExposureTime;
-  const sv = e.ShutterSpeedValue;
-  if (sv === undefined || sv === null || sv === '') return null;
-  const n = typeof sv === 'string' ? parseFloat(sv) : sv;
-  if (!Number.isFinite(n)) return null;
-  return Math.pow(2, -n);
+function getFNumber(e) {
+  if (e.FNumber === undefined || e.FNumber === null) return '';
+  const f = parseFloat(e.FNumber);
+  if (isNaN(f)) return '';
+  return `f/${f}`;
 }
 
-// ExifTool emits "2026:05:03 11:26:41" — JS Date doesn't parse colons in the
-// date portion, so we normalize first.
+function getISO(e) {
+  let iso = e.ISO ?? e.ISOSpeedRatings ?? e.RecommendedExposureIndex;
+  if (Array.isArray(iso)) iso = iso[0];
+  return iso ? `ISO ${iso}` : '';
+}
+
 function formatDate(s) {
   if (!s) return '';
-  const m = /^(\d{4}):(\d{2}):(\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2}))?/.exec(String(s));
-  if (m) {
-    return `${m[1]}-${m[2]}-${m[3]}`;
+  if (s instanceof Date) {
+    if (isNaN(s.getTime())) return '';
+    return s.toISOString().split('T')[0];
   }
-  // Fallback: try Date parsing
+  // Defensive: handle "2026:05:03 11:26:41" string format too
+  const m = /^(\d{4}):(\d{2}):(\d{2})/.exec(String(s));
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
   const d = new Date(s);
   if (!isNaN(d.getTime())) return d.toISOString().split('T')[0];
   return '';
@@ -213,13 +190,7 @@ function formatDate(s) {
 
 function formatExposureBias(v) {
   if (v === undefined || v === null || v === '') return '';
-  // With print conversion, ExifTool may return "+0.7", "0", "-1/3", etc.
-  if (typeof v === 'string') {
-    const trimmed = v.trim();
-    if (trimmed === '0' || trimmed === '+0' || trimmed === '-0') return '±0 EV';
-    return `${trimmed} EV`;
-  }
-  const n = Number(v);
+  const n = typeof v === 'string' ? parseFloat(v) : v;
   if (!Number.isFinite(n)) return '';
   if (n === 0) return '±0 EV';
   return `${n > 0 ? '+' : ''}${n.toFixed(1)} EV`;
@@ -227,13 +198,12 @@ function formatExposureBias(v) {
 
 function formatFlash(v) {
   if (v === undefined || v === null || v === '') return '';
-  // Print-converted: "Off, Did not fire", "Fired", "Auto, Fired", "No Flash"
   if (typeof v === 'string') {
     const lc = v.toLowerCase();
     if (lc.includes('no flash')) return 'No flash';
     if (lc.includes('did not')) return 'Not fired';
     if (lc.includes('fired')) return 'Fired';
-    return v;  // last resort: show whatever we got
+    return v;
   }
   const n = Number(v);
   if (!Number.isFinite(n)) return '';
@@ -242,15 +212,10 @@ function formatFlash(v) {
 }
 
 function formatGPS(lat, lon) {
-  if (lat === undefined || lat === null || lat === '' ||
-      lon === undefined || lon === null || lon === '') return '';
-  // Print conversion can yield strings like "35 deg 39' 31.21\" N" — fall back
-  // to passing the raw text through if it isn't a plain number.
+  if (lat === undefined || lat === null || lon === undefined || lon === null) return '';
   const latNum = typeof lat === 'string' ? parseFloat(lat) : lat;
   const lonNum = typeof lon === 'string' ? parseFloat(lon) : lon;
-  if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) {
-    return typeof lat === 'string' && typeof lon === 'string' ? `${lat}, ${lon}` : '';
-  }
+  if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return '';
   const ns = latNum >= 0 ? 'N' : 'S';
   const ew = lonNum >= 0 ? 'E' : 'W';
   return `${Math.abs(latNum).toFixed(4)}°${ns} ${Math.abs(lonNum).toFixed(4)}°${ew}`;
@@ -279,10 +244,7 @@ function formatStabilization(v) {
 
 function formatBattery(v) {
   if (v === undefined || v === null || v === '') return '';
-  // Print conversion may already include "%". If not, append.
-  if (typeof v === 'string') {
-    return v.includes('%') ? v : `${v}%`;
-  }
+  if (typeof v === 'string') return v.includes('%') ? v : `${v}%`;
   return `${Math.round(v)}%`;
 }
 
@@ -290,15 +252,13 @@ function formatFocusDistance(v) {
   if (v === undefined || v === null) return '';
   const n = typeof v === 'string' ? parseFloat(v) : v;
   if (!Number.isFinite(n) || n === 0) return '';
-  if (n === 0xffff) return '∞';
   return `${n.toFixed(2)}m`;
 }
 
-// LV at ISO 100. LV = log2(N²/t) - log2(ISO/100). Higher = brighter scene.
-function computeLightValue(N, t, iso) {
-  if (!N || !t || !iso) return '';
-  const lv = Math.log2((N * N) / t) - Math.log2(iso / 100);
-  return `LV ${lv.toFixed(1)}`;
+function mapOrPassthrough(map, v) {
+  if (v === undefined || v === null || v === '') return '';
+  if (Object.prototype.hasOwnProperty.call(map, v)) return map[v];
+  return typeof v === 'string' ? v : String(v);
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────
@@ -313,169 +273,214 @@ const EMPTY_METADATA = {
   gps: '', altitude: '',
   author: '', copyright: '',
   dimensions: '', megapixels: '', colorSpace: '',
-  creativeStyle: '', pictureProfile: '',
   imageStabilization: '', driveMode: '', batteryLevel: '',
-  lightValue: '', focusDistance: '', quality: '',
+  focusDistance: '', quality: '',
 };
 
 export async function readExif(file) {
   const out = { ...EMPTY_METADATA };
-
+  let e;
   try {
-    const exiftool = await getExiftool();
-    // No -n: lets ExifTool apply print conversions so internal numeric codes
-    // (e.g. LensType=49479) become human-readable strings ("Tamron 25-200mm…").
-    // -q -m suppresses stderr noise (parseMetadata treats any stderr as failure).
-    const result = await exiftool.parseMetadata(file, withPatchedFetch({
-      args: ['-json', '-q', '-m'],
-      transform: (data) => JSON.parse(data),
-    }));
-
-    if (!result || !result.success) {
-      console.warn('ExifTool returned failure:', result);
-      return out;
-    }
-    // result.data may already be parsed (transform applied) or still a raw string.
-    let parsed = result.data;
-    if (typeof parsed === 'string') {
-      try { parsed = JSON.parse(parsed); } catch { parsed = null; }
-    }
-    if (!Array.isArray(parsed) || !parsed[0]) {
-      console.warn('ExifTool returned no parsed data:', result.data);
-      return out;
-    }
-
-    const e = parsed[0];
-    if (typeof console !== 'undefined' && console.debug) {
-      console.debug('[EXIF]', file.name, e);
-    }
-
-    out.camera = normalizeCamera(e.Make, e.Model);
-    out.lens = pickLens(e);
-    const focal = e.FocalLength;
-    const focalNum = typeof focal === 'string' ? parseFloat(focal) : focal;
-    out.focalLength = Number.isFinite(focalNum) ? `${Math.round(focalNum)}mm` : '';
-    const focal35 = e.FocalLengthIn35mmFormat;
-    const focal35Num = typeof focal35 === 'string' ? parseFloat(focal35) : focal35;
-    out.focalLength35mm = Number.isFinite(focal35Num) ? `${Math.round(focal35Num)}mm` : '';
-    const fNumber = pickFNumber(e);
-    out.aperture = fNumber !== null ? `f/${fNumber}` : '';
-    const expTime = pickExposureTime(e);
-    out.shutter = formatShutter(expTime);
-    const iso = e.ISO ?? e.ISOSpeedRatings ?? e.RecommendedExposureIndex;
-    out.iso = iso ? `ISO ${iso}` : '';
-    out.exposureBias = formatExposureBias(e.ExposureCompensation);
-    out.exposureProgram = mapOrPassthrough(EXPOSURE_PROGRAMS, e.ExposureProgram);
-    out.meteringMode = mapOrPassthrough(METERING_MODES, e.MeteringMode);
-    out.whiteBalance = mapOrPassthrough(WHITE_BALANCES, e.WhiteBalance);
-    out.flash = formatFlash(e.Flash);
-    out.date = formatDate(e.DateTimeOriginal || e.CreateDate || e.ModifyDate);
-    out.gps = formatGPS(e.GPSLatitude, e.GPSLongitude);
-    if (e.GPSAltitude !== undefined && e.GPSAltitude !== null && e.GPSAltitude !== '') {
-      const altNum = typeof e.GPSAltitude === 'string'
-        ? parseFloat(e.GPSAltitude)
-        : e.GPSAltitude;
-      out.altitude = Number.isFinite(altNum) ? `${Math.round(altNum)}m` : '';
-    }
-    out.author = e.Artist || '';
-    out.copyright = e.Copyright || '';
-
-    const w = e.ExifImageWidth || e.ImageWidth;
-    const h = e.ExifImageHeight || e.ImageHeight;
-    out.dimensions = formatDimensions(w, h);
-    out.megapixels = formatMegapixels(w, h);
-    out.colorSpace = formatColorSpace(e.ColorSpace);
-
-    out.creativeStyle = e.CreativeStyle || '';
-    out.pictureProfile = e.PictureProfile || '';
-    out.imageStabilization = formatStabilization(e.ImageStabilization);
-    out.driveMode = e.ReleaseMode2 || e.DriveMode2 || e.DriveMode || '';
-    out.batteryLevel = formatBattery(e.BatteryLevel);
-
-    out.lightValue = computeLightValue(fNumber, expTime, iso);
-    out.focusDistance = formatFocusDistance(e.FocusDistance2 || e.FocusDistance || e.SubjectDistance);
-    out.quality = e.Quality || '';
+    e = await exifr.parse(file, {
+      tiff: true,
+      exif: true,
+      gps: true,
+      iptc: true,
+      xmp: true,
+      icc: true,
+      makerNote: true,
+      userComment: true,
+      multiSegment: true,
+      mergeOutput: true,
+    });
   } catch (err) {
     console.warn('EXIF extraction failed:', err);
+    return out;
   }
+  if (!e) return out;
+
+  console.group('[exifr Diagnostic]');
+  console.log('Make:', e.Make);
+  console.log('Model:', e.Model);
+  console.log('LensModel:', e.LensModel);
+  console.log('FocalLength:', e.FocalLength);
+  console.log('FocalLengthIn35mmFormat:', e.FocalLengthIn35mmFormat);
+  console.log('ExposureTime:', e.ExposureTime, '→', getShutter(e));
+  console.log('FNumber:', e.FNumber);
+  console.log('ISO:', e.ISO);
+  console.log('DateTimeOriginal:', e.DateTimeOriginal);
+  console.log('--- All keys ---');
+  console.log(Object.keys(e).sort());
+  console.groupEnd();
+
+  out.camera = normalizeCamera(e.Make, e.Model);
+  out.lens = pickLens(e);
+  out.focalLength = getFocalLength(e);
+  out.focalLength35mm = getFocalLength35mm(e);
+  out.aperture = getFNumber(e);
+  out.shutter = getShutter(e);
+  out.iso = getISO(e);
+  out.exposureBias = formatExposureBias(e.ExposureCompensation);
+  out.exposureProgram = mapOrPassthrough(EXPOSURE_PROGRAMS, e.ExposureProgram);
+  out.meteringMode = mapOrPassthrough(METERING_MODES, e.MeteringMode);
+  out.whiteBalance = mapOrPassthrough(WHITE_BALANCES, e.WhiteBalance);
+  out.flash = formatFlash(e.Flash);
+  out.date = formatDate(e.DateTimeOriginal || e.CreateDate || e.ModifyDate);
+  out.gps = formatGPS(e.GPSLatitude, e.GPSLongitude);
+  if (e.GPSAltitude !== undefined && e.GPSAltitude !== null) {
+    const altNum = typeof e.GPSAltitude === 'string' ? parseFloat(e.GPSAltitude) : e.GPSAltitude;
+    out.altitude = Number.isFinite(altNum) ? `${Math.round(altNum)}m` : '';
+  }
+  out.author = e.Artist || '';
+  out.copyright = e.Copyright || '';
+
+  const w = e.ExifImageWidth || e.ImageWidth;
+  const h = e.ExifImageHeight || e.ImageHeight;
+  out.dimensions = formatDimensions(w, h);
+  out.megapixels = formatMegapixels(w, h);
+  out.colorSpace = formatColorSpace(e.ColorSpace);
+
+  // MakerNote-derived fields — exifr exposes some Sony tags but coverage varies.
+  // If a tag isn't present these stay empty and the row stays empty.
+  out.imageStabilization = formatStabilization(e.ImageStabilization);
+  out.driveMode = e.ReleaseMode2 || e.DriveMode2 || e.DriveMode || '';
+  out.batteryLevel = formatBattery(e.BatteryLevel);
+  out.focusDistance = formatFocusDistance(e.FocusDistance2 || e.FocusDistance || e.SubjectDistance);
+  out.quality = e.Quality || '';
 
   return out;
 }
 
 // Extract embedded preview JPEG from a RAW file (used for RAW-only display).
 //
-// Why we don't use `-b` directly: parseMetadata pipes stdout through TextDecoder,
-// which corrupts binary JPEG bytes. Instead, request all three preview tags
-// in one `-j -b -q` call — ExifTool emits them as `base64:...` strings inside
-// JSON, which survives the text channel. We then decode the first match.
+// Cascade:
+//   1. exifr.thumbnail — fast, no WASM cost. Use immediately if >50 KB.
+//   2. ExifTool WASM `-j -b -JpgFromRaw` — full-size camera JPEG (~2 MB).
+//   3. ExifTool WASM `-j -b -PreviewImage` — mid-size preview (~200 KB).
+//   4. exifr.thumbnail (last resort) — even small thumbnails are better than nothing.
+// Returns { blob, label } or null.
 //
-// Sony ARW typically carries all three; we prefer the largest:
-//   JpgFromRaw     ~2-3 MB, full-size camera-rendered JPEG (best for display)
-//   PreviewImage   ~200-300 KB, mid-size preview
-//   ThumbnailImage ~10 KB, last-resort tiny thumbnail
-const PREVIEW_TAGS = [
-  { key: 'JpgFromRaw', label: 'JpgFromRaw 高解像度' },
-  { key: 'PreviewImage', label: 'PreviewImage' },
-  { key: 'ThumbnailImage', label: 'ThumbnailImage 低解像度' },
-];
-
-async function base64ToBlob(b64) {
-  // Use the data: URL fetch path so the browser handles base64 decode in
-  // optimized native code (atob() in a JS loop is slow for ~4 MB strings).
-  const res = await fetch(`data:image/jpeg;base64,${b64}`);
-  return res.blob();
-}
-
+// We use `-j -b` (JSON with base64-encoded binary) instead of plain `-b`:
+// parseMetadata's stdout passes through TextDecoder, which corrupts raw binary
+// JPEG bytes; base64 strings survive the text channel.
 export async function extractRawPreview(file) {
-  const exiftool = await getExiftool();
-  const failures = [];
+  console.log('[Preview] starting extraction for', file.name, `(${file.size} bytes)`);
 
-  // Try each tag in its own parseMetadata call. Combining all three in one call
-  // would put ~4 MB of base64 in the WASM stdout buffer at once, which seems to
-  // contribute to "memory access out of bounds" on large ARW files.
-  for (const { key, label } of PREVIEW_TAGS) {
-    let result;
-    try {
-      result = await exiftool.parseMetadata(file, withPatchedFetch({
-        args: ['-j', '-b', '-q', '-m', `-${key}`],
-      }));
-    } catch (err) {
-      failures.push(`${key}: parseMetadata threw (${err && err.message || err})`);
-      continue;
-    }
-    if (!result || !result.success || !result.data) {
-      failures.push(`${key}: ${(result && result.error) || 'no data'}`);
-      continue;
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(result.data);
-    } catch (err) {
-      failures.push(`${key}: JSON parse failed`);
-      continue;
-    }
-    const obj = Array.isArray(parsed) ? parsed[0] : parsed;
-    const value = obj && obj[key];
-    if (value == null) {
-      failures.push(`${key}: tag missing`);
-      continue;
-    }
-    if (typeof value !== 'string' || !value.startsWith('base64:')) {
-      failures.push(`${key}: unexpected format (${typeof value})`);
-      continue;
-    }
-    try {
-      const blob = await base64ToBlob(value.slice('base64:'.length));
-      if (blob.size > 0) {
-        console.debug(`[RAW preview] hit ${key} (${blob.size} bytes)`);
-        return { blob, tag: key, label };
+  // 1. exifr's lightweight path
+  let exifrThumb = null;
+  try {
+    exifrThumb = await exifr.thumbnail(file);
+    if (exifrThumb) {
+      console.log('[Preview] exifr.thumbnail returned', exifrThumb.byteLength, 'bytes');
+      if (exifrThumb.byteLength > 50000) {
+        return { blob: new Blob([exifrThumb], { type: 'image/jpeg' }), label: 'exifr thumbnail' };
       }
-      failures.push(`${key}: empty blob after decode`);
-    } catch (err) {
-      failures.push(`${key}: decode failed (${err && err.message || err})`);
+    } else {
+      console.log('[Preview] exifr.thumbnail returned null/empty');
     }
+  } catch (e) {
+    console.warn('[Preview] exifr.thumbnail threw:', e);
   }
 
-  console.warn('[RAW preview] all tags failed:', failures);
-  throw new Error('No embedded preview image found in RAW file');
+  // 2-4. Lazy-load WASM and try preview tags in priority order. ThumbnailImage
+  // is the smallest (~10 KB IFD1 thumb) but always present — keeps us from
+  // returning null when the larger embedded JPEGs aren't extractable.
+  emitProcessing(true);
+  try {
+    for (const tag of ['JpgFromRaw', 'PreviewImage', 'ThumbnailImage']) {
+      try {
+        console.log(`[Preview] attempting WASM ExifTool ${tag}…`);
+        const blob = await extractViaExifTool(file, tag);
+        if (blob && blob.size > 0) {
+          console.log(`[Preview] WASM ${tag} succeeded:`, blob.size, 'bytes');
+          return { blob, label: `ExifTool ${tag}` };
+        }
+        console.log(`[Preview] WASM ${tag}: no usable data`);
+      } catch (e) {
+        console.warn(`[Preview] WASM ${tag} threw:`, e);
+      }
+    }
+  } finally {
+    emitProcessing(false);
+  }
+
+  // 4. Last-resort: small exifr thumbnail (better than null)
+  if (exifrThumb && exifrThumb.byteLength > 0) {
+    console.log('[Preview] using small exifr thumbnail as fallback:', exifrThumb.byteLength, 'bytes');
+    return { blob: new Blob([exifrThumb], { type: 'image/jpeg' }), label: 'exifr thumbnail (low-res)' };
+  }
+
+  console.warn('[Preview] all sources failed');
+  return null;
+}
+
+async function extractViaExifTool(file, tag) {
+  let exiftool;
+  try {
+    exiftool = await getExiftool();
+  } catch (err) {
+    console.warn(`[Preview] WASM ExifTool import failed for ${tag}:`, err);
+    return null;
+  }
+
+  let result;
+  try {
+    result = await exiftool.parseMetadata(file, {
+      args: ['-j', '-b', '-q', '-m', `-${tag}`],
+      fetch: patchedFetch,
+    });
+  } catch (err) {
+    console.warn(`[Preview] parseMetadata threw for ${tag}:`, err);
+    return null;
+  }
+
+  if (!result) {
+    console.log(`[Preview] ${tag}: parseMetadata returned falsy`);
+    return null;
+  }
+  if (!result.success) {
+    console.log(`[Preview] ${tag}: success=false, error=${result.error || '(none)'}`);
+    return null;
+  }
+  if (!result.data) {
+    console.log(`[Preview] ${tag}: data is empty`);
+    return null;
+  }
+
+  // Quick visual check of what came back so we can spot encoding issues.
+  const dataStr = typeof result.data === 'string' ? result.data : '';
+  console.log(`[Preview] ${tag}: data length=${dataStr.length}, head:`, dataStr.slice(0, 120));
+
+  let parsed;
+  try {
+    parsed = JSON.parse(dataStr);
+  } catch (e) {
+    console.warn(`[Preview] ${tag}: JSON parse failed:`, e);
+    return null;
+  }
+
+  const obj = Array.isArray(parsed) ? parsed[0] : parsed;
+  if (!obj) {
+    console.log(`[Preview] ${tag}: parsed object empty`);
+    return null;
+  }
+
+  const value = obj[tag];
+  if (value == null) {
+    console.log(`[Preview] ${tag}: tag missing from response. Keys:`, Object.keys(obj));
+    return null;
+  }
+  if (typeof value !== 'string') {
+    console.log(`[Preview] ${tag}: value is not a string (type: ${typeof value})`);
+    return null;
+  }
+  if (!value.startsWith('base64:')) {
+    console.log(`[Preview] ${tag}: value lacks base64: prefix. Head:`, value.slice(0, 80));
+    return null;
+  }
+
+  // Native base64 decode via data: URL fetch is much faster than atob() loops
+  // for multi-MB strings.
+  const res = await fetch(`data:image/jpeg;base64,${value.slice('base64:'.length)}`);
+  return res.blob();
 }

@@ -1,33 +1,49 @@
 // Main Application Module
-import {
-  readExif,
-  extractRawPreview,
-  preloadExiftool,
-  onReadyStateChange,
-  getReadyState,
-} from './exif-reader.js';
+import { readExif, extractRawPreview, onPreviewProcessing } from './exif-reader.js';
 import { renderPreview, exportImage } from './renderer.js';
-import { FIELDS } from './fields.js';
+import { FIELDS, SECTIONS } from './fields.js';
 
-const STORAGE_KEY = 'exif-frame-settings';
+const STORAGE_KEY = 'exifFrameAppPreferences';
+const LEGACY_STORAGE_KEY = 'exif-frame-settings';
 const JPEG_LIMIT = 50 * 1024 * 1024;
 const RAW_LIMIT = 200 * 1024 * 1024;
 const RAW_EXTS = /\.(arw|cr3|cr2|nef|raf|dng|rw2|orf|pef|srw)$/i;
 const JPEG_EXTS = /\.(jpe?g|png|heic|heif)$/i;
 
+const SOFTWARE_OPTIONS = [
+  { value: '',                   label: 'なし (表示しない)' },
+  { value: 'DaVinci Resolve',    label: 'DaVinci Resolve' },
+  { value: 'Adobe Lightroom',    label: 'Adobe Lightroom' },
+  { value: 'Adobe Photoshop',    label: 'Adobe Photoshop' },
+  { value: 'Capture One',        label: 'Capture One' },
+  { value: 'Sony Imaging Edge',  label: 'Sony Imaging Edge' },
+  { value: 'Darktable',          label: 'Darktable' },
+  { value: 'RawTherapee',        label: 'RawTherapee' },
+  { value: 'other',              label: 'その他...' },
+];
+
+const LOGO_OPTIONS = [
+  { value: 'none',       label: 'なし (テキストのみ)' },
+  { value: 'sony-alpha', label: 'Sony α' },
+  { value: 'sony',       label: 'SONY' },
+];
+
+const PRESERVE = new Set(['author']);  // values kept across photo loads
+
 // State
 let jpegFile = null;
 let rawFile = null;
 let currentImage = null;
-let currentImageUrl = null;  // for revoking object URLs we create
+let currentImageUrl = null;
 let currentFileName = '';
 let currentMetadata = {};
-let displaySource = 'none';  // 'jpeg' | 'raw-preview' | 'none'
-let exifSource = 'none';     // 'raw'  | 'jpeg'        | 'none'
-let rawPreviewSource = null; // { tag, label } when display is RAW preview
+let displaySource = 'none';
+let exifSource = 'none';
+let rawPreviewSource = null;
 let currentTemplate = 'minimal-white';
+let copyrightTemplate = '© {year} {author}';
 
-// DOM Elements
+// DOM Elements (resolved at init)
 const dropzonesEl = document.getElementById('dropzones');
 const jpegDropZone = document.getElementById('jpeg-drop-zone');
 const rawDropZone = document.getElementById('raw-drop-zone');
@@ -40,6 +56,7 @@ const exportBtn = document.getElementById('export-btn');
 const templateBtns = document.querySelectorAll('.template-btn');
 const resetBtn = document.getElementById('reset-btn');
 const customControls = document.getElementById('custom-controls');
+const resetPrefsBtn = document.getElementById('reset-prefs-btn');
 
 const jpegFileName = document.getElementById('jpeg-file-name');
 const jpegPickBtn = document.getElementById('jpeg-pick-btn');
@@ -51,155 +68,283 @@ const displaySourceLabel = document.getElementById('display-source-label');
 const exifSourceLabel = document.getElementById('exif-source-label');
 const statusHint = document.getElementById('status-hint');
 
-const softwareSelect = document.getElementById('software');
-const softwareCustom = document.getElementById('softwareCustom');
-const showSoftwareCb = document.getElementById('show_software');
-
-const EXTRA_INPUTS = ['logo', 'show_logo', 'customFrame', 'customBar', 'cornerRadius'];
-const PRESERVE = new Set(['author']);
-
 // --- Initialization ---
 
 function init() {
   buildForm();
   loadSettings();
   setupEventListeners();
-  setupStatusBadge();
-  registerServiceWorker();
-  // Kick off WASM init in the background so the user's first file is fast.
-  preloadExiftool();
-}
-
-function setupStatusBadge() {
-  const badge = document.getElementById('exiftool-status');
-  const text = document.getElementById('exiftool-status-text');
-  if (!badge || !text) return;
-
-  const apply = (state) => {
-    badge.classList.remove('loading', 'ready', 'error');
-    badge.classList.add(state);
-    if (state === 'ready') text.textContent = 'ExifTool 準備完了 ✓';
-    else if (state === 'error') text.textContent = 'ExifTool 読み込み失敗';
-    else text.textContent = 'ExifTool 読み込み中…';
-  };
-
-  apply(getReadyState());
-  onReadyStateChange(apply);
-}
-
-function registerServiceWorker() {
-  if (!('serviceWorker' in navigator)) return;
-  // Use relative path so it works on GitHub Pages (/exif-frame/) and on
-  // the apex domain alike.
-  navigator.serviceWorker.register('./sw.js').catch((err) => {
-    console.warn('Service worker registration failed:', err);
+  cleanupLegacyServiceWorker();
+  // exif-reader emits start/end events when it lazy-loads ExifTool WASM
+  // for RAW preview extraction — surface a banner so the user knows why
+  // the first ARW load is slow.
+  onPreviewProcessing((active) => {
+    if (active) {
+      showProcessing('プレビュー画像を読み込み中... (初回は数秒、2回目以降はキャッシュで高速)');
+    } else {
+      hideProcessing();
+    }
   });
 }
 
+function showProcessing(message) {
+  const banner = document.getElementById('processing-banner');
+  const text = document.getElementById('processing-message');
+  if (banner && text) {
+    text.textContent = message;
+    banner.classList.remove('hidden');
+  }
+}
+
+function hideProcessing() {
+  const banner = document.getElementById('processing-banner');
+  if (banner) banner.classList.add('hidden');
+}
+
+// The previous ExifTool WASM build registered a Service Worker for caching
+// zeroperl.wasm. We don't need it any more — clean up so users coming back
+// from the old version don't keep stale cached responses.
+function cleanupLegacyServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.getRegistrations().then((regs) => {
+    for (const reg of regs) reg.unregister().catch(() => {});
+  }).catch(() => {});
+  if ('caches' in self) {
+    caches.keys().then((keys) => {
+      for (const k of keys) {
+        if (/exif-frame|exiftool/i.test(k)) caches.delete(k).catch(() => {});
+      }
+    }).catch(() => {});
+  }
+}
+
+// --- Form rendering (sections + fields) ---
+
 function buildForm() {
   metadataForm.innerHTML = '';
-  for (const f of FIELDS) {
-    if (f.customUI) continue;  // rendered as a dedicated row in HTML
-    const row = document.createElement('div');
-    row.className = 'info-row';
-    row.dataset.field = f.id;
+  for (const section of SECTIONS) {
+    const sectionEl = document.createElement('details');
+    sectionEl.className = 'form-section';
+    sectionEl.dataset.section = section.id;
+    if (section.defaultOpen) sectionEl.open = true;
 
-    const label = document.createElement('label');
-    label.htmlFor = f.id;
-    label.textContent = f.label;
+    const summary = document.createElement('summary');
+    summary.innerHTML =
+      '<span class="section-toggle">▶</span>' +
+      `<span class="section-label">${section.label}</span>` +
+      `<span class="section-count" data-section-count="${section.id}"></span>`;
+    sectionEl.appendChild(summary);
 
+    const body = document.createElement('div');
+    body.className = 'section-body';
+    for (const f of FIELDS) {
+      if (f.section !== section.id) continue;
+      body.appendChild(renderFieldRow(f));
+    }
+    sectionEl.appendChild(body);
+    metadataForm.appendChild(sectionEl);
+  }
+  updateSectionCounts();
+}
+
+function renderFieldRow(f) {
+  const row = document.createElement('div');
+  row.className = 'info-row';
+  row.dataset.field = f.id;
+
+  const label = document.createElement('label');
+  label.htmlFor = f.id;
+  label.textContent = f.label;
+  row.appendChild(label);
+
+  if (f.customUI === 'logo') {
+    const select = document.createElement('select');
+    select.id = 'logo';
+    for (const o of LOGO_OPTIONS) {
+      const opt = document.createElement('option');
+      opt.value = o.value;
+      opt.textContent = o.label;
+      select.appendChild(opt);
+    }
+    row.appendChild(select);
+  } else if (f.customUI === 'software') {
+    const wrap = document.createElement('div');
+    wrap.className = 'software-controls';
+    const select = document.createElement('select');
+    select.id = 'software';
+    for (const o of SOFTWARE_OPTIONS) {
+      const opt = document.createElement('option');
+      opt.value = o.value;
+      opt.textContent = o.label;
+      select.appendChild(opt);
+    }
+    const customInput = document.createElement('input');
+    customInput.type = 'text';
+    customInput.id = 'softwareCustom';
+    customInput.className = 'hidden';
+    customInput.placeholder = 'ソフト名を入力';
+    wrap.appendChild(select);
+    wrap.appendChild(customInput);
+    row.appendChild(wrap);
+  } else {
     const input = document.createElement('input');
     input.type = f.type === 'date' ? 'date' : 'text';
     input.id = f.id;
     if (f.placeholder) input.placeholder = f.placeholder;
     if (!f.editable) input.disabled = true;
-
-    const showWrap = document.createElement('label');
-    showWrap.className = 'show-toggle';
-    showWrap.title = '画像に表示する';
-    const showCb = document.createElement('input');
-    showCb.type = 'checkbox';
-    showCb.id = 'show_' + f.id;
-    showCb.checked = !!f.defaultShow;
-    showWrap.appendChild(showCb);
-    showWrap.appendChild(document.createTextNode('表示'));
-
-    row.appendChild(label);
     row.appendChild(input);
-    row.appendChild(showWrap);
     if (f.id === 'aperture') {
-      // Inline note that appears only when EXIF source is JPEG (FNumber unreliable).
       const warn = document.createElement('span');
       warn.className = 'f-value-warning';
       warn.textContent = '⚠ RAW読み込み推奨';
-      input.after(warn);  // sits between input and show-toggle
+      row.appendChild(warn);
     }
-    metadataForm.appendChild(row);
+  }
+
+  const showWrap = document.createElement('label');
+  showWrap.className = 'show-toggle';
+  showWrap.title = '画像に表示する';
+  const showCb = document.createElement('input');
+  showCb.type = 'checkbox';
+  showCb.id = 'show_' + f.id;
+  showCb.checked = !!f.defaultShow;
+  showWrap.appendChild(showCb);
+  showWrap.appendChild(document.createTextNode('表示'));
+  row.appendChild(showWrap);
+
+  return row;
+}
+
+function updateSectionCounts() {
+  for (const section of SECTIONS) {
+    const fieldsInSection = FIELDS.filter((f) => f.section === section.id);
+    const total = fieldsInSection.length;
+    const checked = fieldsInSection.filter((f) => {
+      const cb = document.getElementById('show_' + f.id);
+      return cb && cb.checked;
+    }).length;
+    const counter = document.querySelector(`[data-section-count="${section.id}"]`);
+    if (counter) counter.textContent = `${checked}/${total} 表示`;
   }
 }
 
-function getInputIds() {
-  const ids = [];
-  for (const f of FIELDS) {
-    if (!f.customUI) ids.push(f.id);
-    ids.push('show_' + f.id);
-  }
-  ids.push(...EXTRA_INPUTS);
-  ids.push('software', 'softwareCustom');
-  return ids;
-}
+// --- Storage ---
 
 function loadSettings() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (!saved) return;
-    if (saved.defaults) {
-      for (const [id, value] of Object.entries(saved.defaults)) {
-        const el = document.getElementById(id);
-        if (!el) continue;
-        if (el.type === 'checkbox') el.checked = !!value;
-        else el.value = value;
-      }
-    }
-    if (saved.preferredEditingSoftware !== undefined) {
-      softwareSelect.value = saved.preferredEditingSoftware;
-    }
-    if (saved.customEditingSoftware !== undefined) {
-      softwareCustom.value = saved.customEditingSoftware;
-    }
-    updateSoftwareCustomVisibility();
-    if (saved.copyrightTemplate) {
-      copyrightTemplate = saved.copyrightTemplate;
-    }
-    if (saved.preferredTemplate) {
-      currentTemplate = saved.preferredTemplate;
+  let saved = readPrefs();
+  if (!saved) saved = migrateLegacy();
+  if (!saved) return;
+
+  if (saved.preferences) {
+    const p = saved.preferences;
+    if (p.author !== undefined) setInput('author', p.author);
+    if (p.copyrightTemplate) copyrightTemplate = p.copyrightTemplate;
+    if (p.editingSoftware !== undefined) setInput('software', p.editingSoftware);
+    if (p.editingSoftwareCustom !== undefined) setInput('softwareCustom', p.editingSoftwareCustom);
+    if (p.logo !== undefined) setInput('logo', p.logo);
+    if (p.customFrame !== undefined) setInput('customFrame', p.customFrame);
+    if (p.customBar !== undefined) setInput('customBar', p.customBar);
+    if (p.cornerRadius !== undefined) setInput('cornerRadius', p.cornerRadius);
+    if (p.preferredTemplate) {
+      currentTemplate = p.preferredTemplate;
       updateTemplateUI();
     }
-  } catch (e) { /* ignore */ }
+    if (p.sectionOpen) {
+      for (const [id, open] of Object.entries(p.sectionOpen)) {
+        const el = document.querySelector(`details.form-section[data-section="${id}"]`);
+        if (el) el.open = !!open;
+      }
+    }
+  }
+
+  if (saved.visibleFields) {
+    for (const [id, visible] of Object.entries(saved.visibleFields)) {
+      const cb = document.getElementById('show_' + id);
+      if (cb) cb.checked = !!visible;
+    }
+    updateSectionCounts();
+  }
+
+  updateSoftwareCustomVisibility();
+}
+
+function readPrefs() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY));
+  } catch { return null; }
+}
+
+// One-time migration from the v3-era flat shape so returning users keep their
+// author / camera defaults / show toggles without re-configuring.
+function migrateLegacy() {
+  let legacy;
+  try { legacy = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY)); }
+  catch { return null; }
+  if (!legacy) return null;
+
+  const visibleFields = {};
+  const preferences = {};
+  if (legacy.defaults) {
+    const d = legacy.defaults;
+    for (const [k, v] of Object.entries(d)) {
+      if (k.startsWith('show_')) visibleFields[k.slice(5)] = !!v;
+      else if (['author', 'logo', 'customFrame', 'customBar', 'cornerRadius'].includes(k)) preferences[k] = v;
+    }
+  }
+  if (legacy.preferredTemplate) preferences.preferredTemplate = legacy.preferredTemplate;
+  if (legacy.preferredEditingSoftware !== undefined) preferences.editingSoftware = legacy.preferredEditingSoftware;
+  if (legacy.customEditingSoftware !== undefined) preferences.editingSoftwareCustom = legacy.customEditingSoftware;
+  if (legacy.copyrightTemplate) preferences.copyrightTemplate = legacy.copyrightTemplate;
+
+  const migrated = { visibleFields, preferences };
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch { /* quota? leave legacy in place */ }
+  return migrated;
 }
 
 function saveSettings() {
-  const defaults = {};
-  for (const id of PRESERVE) {
-    const el = document.getElementById(id);
-    if (el) defaults[id] = el.value;
-  }
+  const visibleFields = {};
   for (const f of FIELDS) {
     const cb = document.getElementById('show_' + f.id);
-    if (cb) defaults['show_' + f.id] = cb.checked;
+    if (cb) visibleFields[f.id] = cb.checked;
   }
-  for (const id of ['logo', 'show_logo', 'customFrame', 'customBar', 'cornerRadius']) {
-    const el = document.getElementById(id);
-    if (!el) continue;
-    defaults[id] = el.type === 'checkbox' ? el.checked : el.value;
+
+  const sectionOpen = {};
+  for (const section of SECTIONS) {
+    const el = document.querySelector(`details.form-section[data-section="${section.id}"]`);
+    if (el) sectionOpen[section.id] = el.open;
   }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({
-    defaults,
-    preferredTemplate: currentTemplate,
-    preferredEditingSoftware: softwareSelect.value,
-    customEditingSoftware: softwareCustom.value,
+
+  const preferences = {
+    author: getInput('author'),
     copyrightTemplate,
-  }));
+    editingSoftware: getInput('software'),
+    editingSoftwareCustom: getInput('softwareCustom'),
+    logo: getInput('logo'),
+    customFrame: getInput('customFrame'),
+    customBar: getInput('customBar'),
+    cornerRadius: getInput('cornerRadius'),
+    preferredTemplate: currentTemplate,
+    sectionOpen,
+  };
+
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ visibleFields, preferences }));
+  } catch (err) {
+    console.warn('Failed to persist preferences:', err);
+  }
+}
+
+function getInput(id) {
+  const el = document.getElementById(id);
+  return el ? el.value : '';
+}
+
+function setInput(id, value) {
+  const el = document.getElementById(id);
+  if (el && value !== undefined && value !== null) el.value = value;
 }
 
 // --- Event Listeners ---
@@ -226,11 +371,23 @@ function setupEventListeners() {
   rawPickBtn.addEventListener('click', () => rawFileInput.click());
   rawRemoveBtn.addEventListener('click', removeRaw);
 
-  for (const id of getInputIds()) {
+  // Listen on the form root — picks up inputs inside dynamically generated rows.
+  metadataForm.addEventListener('input', onFormChange);
+  metadataForm.addEventListener('change', onFormChange);
+
+  // Persist section open/closed state
+  for (const section of SECTIONS) {
+    const el = document.querySelector(`details.form-section[data-section="${section.id}"]`);
+    if (el) el.addEventListener('toggle', saveSettings);
+  }
+
+  // Custom-template controls live outside metadataForm
+  for (const id of ['customFrame', 'customBar', 'cornerRadius']) {
     const el = document.getElementById(id);
-    if (!el) continue;
-    el.addEventListener('input', onFormChange);
-    el.addEventListener('change', onFormChange);
+    if (el) {
+      el.addEventListener('input', onFormChange);
+      el.addEventListener('change', onFormChange);
+    }
   }
 
   for (const btn of templateBtns) {
@@ -245,12 +402,7 @@ function setupEventListeners() {
   exportBtn.addEventListener('click', handleExport);
   resetBtn.addEventListener('click', resetAll);
 
-  // Software dropdown: toggle custom input visibility when "other" is chosen
-  softwareSelect.addEventListener('change', updateSoftwareCustomVisibility);
-}
-
-function updateSoftwareCustomVisibility() {
-  softwareCustom.classList.toggle('hidden', softwareSelect.value !== 'other');
+  if (resetPrefsBtn) resetPrefsBtn.addEventListener('click', handleResetPrefs);
 }
 
 function attachDropZone(zoneEl, onFile) {
@@ -265,6 +417,13 @@ function attachDropZone(zoneEl, onFile) {
     const file = e.dataTransfer.files[0];
     if (file) onFile(file);
   });
+}
+
+function updateSoftwareCustomVisibility() {
+  const select = document.getElementById('software');
+  const custom = document.getElementById('softwareCustom');
+  if (!select || !custom) return;
+  custom.classList.toggle('hidden', select.value !== 'other');
 }
 
 // --- File Acceptance ---
@@ -298,8 +457,6 @@ async function acceptRaw(file) {
     return;
   }
   rawFile = file;
-
-  // RAW alone: extract embedded preview to use as display image
   if (!jpegFile) {
     try {
       await loadRawPreviewImage(file);
@@ -321,7 +478,6 @@ async function removeJpeg() {
   jpegFile = null;
   releaseImage();
   if (rawFile) {
-    // Fall back to RAW embedded preview
     try {
       await loadRawPreviewImage(rawFile);
       displaySource = 'raw-preview';
@@ -342,7 +498,6 @@ async function removeJpeg() {
 async function removeRaw() {
   rawFile = null;
   if (jpegFile) {
-    // JPEG remains as display, EXIF re-derives from JPEG
     await refreshExif();
     updateFileStatus();
   } else {
@@ -378,7 +533,6 @@ function showPreviewSection() {
   previewSection.classList.remove('hidden');
 }
 
-// Load JPEG/PNG/HEIC as the display image
 function loadJpegImage(file) {
   releaseImage();
   return new Promise((resolve, reject) => {
@@ -397,12 +551,11 @@ function loadJpegImage(file) {
   });
 }
 
-// Extract embedded JPEG preview from RAW (cascading tags: JpgFromRaw → PreviewImage
-// → ThumbnailImage) and use it as the display image. Records which tag yielded
-// the image so the UI can surface it.
 async function loadRawPreviewImage(file) {
-  const { blob, tag, label } = await extractRawPreview(file);
-  rawPreviewSource = { tag, label };
+  const result = await extractRawPreview(file);
+  if (!result) throw new Error('No embedded preview in RAW file');
+  const { blob, label } = result;
+  rawPreviewSource = { label };
   const url = URL.createObjectURL(blob);
   releaseImage();
   return new Promise((resolve, reject) => {
@@ -420,7 +573,7 @@ async function loadRawPreviewImage(file) {
   });
 }
 
-// --- EXIF Refresh ---
+// --- EXIF refresh ---
 
 async function refreshExif() {
   const source = rawFile || jpegFile;
@@ -431,37 +584,30 @@ async function refreshExif() {
   exifSource = rawFile ? 'raw' : 'jpeg';
 
   const exifData = await readExif(source);
-  const savedAuthor = document.getElementById('author').value;
+  const savedAuthor = getInput('author');
   currentMetadata = {
     ...exifData,
-    author: exifData.author || savedAuthor || 'NISHIMURA',
+    author: exifData.author || savedAuthor || 'NISHIMURA, Sota',
   };
   populateForm(currentMetadata);
   resolveCopyrightIntoForm();
   render();
 }
 
-// Default template uses placeholders so year/author update per-photo.
-// User can overwrite with literal text, which then becomes the template.
-const DEFAULT_COPYRIGHT_TEMPLATE = '© {year} {author}';
-let copyrightTemplate = DEFAULT_COPYRIGHT_TEMPLATE;
-
 function resolveCopyrightIntoForm() {
   const el = document.getElementById('copyright');
   if (!el) return;
-  const dateVal = document.getElementById('date').value;
+  const dateVal = getInput('date');
   const year = dateVal ? new Date(dateVal).getFullYear() : new Date().getFullYear();
-  const author = document.getElementById('author').value || '';
+  const author = getInput('author') || '';
   el.value = copyrightTemplate
     .replace(/\{year\}/g, year)
     .replace(/\{author\}/g, author);
-  updateRowVisibility();
 }
 
-// --- File Status UI ---
+// --- File status UI ---
 
 function updateFileStatus() {
-  // JPEG row
   if (jpegFile) {
     jpegFileName.textContent = jpegFile.name;
     jpegFileName.classList.remove('placeholder');
@@ -474,7 +620,6 @@ function updateFileStatus() {
     jpegRemoveBtn.classList.add('hidden');
   }
 
-  // RAW row
   if (rawFile) {
     rawFileName.textContent = rawFile.name;
     rawFileName.classList.remove('placeholder');
@@ -487,7 +632,6 @@ function updateFileStatus() {
     rawRemoveBtn.classList.add('hidden');
   }
 
-  // Source labels + hint
   let displayMsg = '';
   let exifMsg = '';
   let exifPartial = false;
@@ -513,11 +657,10 @@ function updateFileStatus() {
   exifSourceLabel.classList.toggle('partial', exifPartial);
   statusHint.textContent = hint;
 
-  // F値警告: JPEGからのEXIF抽出時はFNumberが誤りうる(Resolve書き出しの既知問題)。
   metadataForm.classList.toggle('f-value-warn', exifSource === 'jpeg');
 }
 
-// --- Form ---
+// --- Form data ---
 
 function populateForm(metadata) {
   for (const f of FIELDS) {
@@ -525,35 +668,17 @@ function populateForm(metadata) {
     const el = document.getElementById(f.id);
     if (!el) continue;
     if (!f.editable) {
-      // Mirror EXIF exactly — overwrite with empty too (so removing RAW clears
-      // ARW-only values like exposureBias from the form).
       el.value = metadata[f.id] || '';
     } else if (metadata[f.id]) {
-      // Editable fields: only overwrite when EXIF has a value (preserve user input)
       el.value = metadata[f.id];
     }
-  }
-  updateRowVisibility();
-}
-
-// Hide rows flagged hideWhenEmpty when their value is empty. Basic fields
-// (camera/lens/focal/aperture/shutter/iso/date) stay visible regardless so
-// the form structure is always discoverable.
-function updateRowVisibility() {
-  for (const f of FIELDS) {
-    if (f.customUI) continue;
-    if (!f.hideWhenEmpty) continue;
-    const el = document.getElementById(f.id);
-    if (!el) continue;
-    const row = el.closest('.info-row');
-    if (!row) continue;
-    row.classList.toggle('hidden', !el.value);
   }
 }
 
 function clearForm() {
   for (const f of FIELDS) {
     if (PRESERVE.has(f.id)) continue;
+    if (f.customUI) continue;
     const el = document.getElementById(f.id);
     if (el) el.value = '';
   }
@@ -562,33 +687,38 @@ function clearForm() {
 function readFormMetadata() {
   const data = {};
   for (const f of FIELDS) {
-    if (!f.customUI) {
-      const el = document.getElementById(f.id);
-      if (el) data[f.id] = el.value;
-    }
     const cb = document.getElementById('show_' + f.id);
     if (cb) data['show_' + f.id] = cb.checked;
+    if (f.customUI === 'software') continue;  // resolved below
+    if (f.customUI === 'logo') continue;
+    const el = document.getElementById(f.id);
+    if (el) data[f.id] = el.value;
   }
-  for (const id of EXTRA_INPUTS) {
-    const el = document.getElementById(id);
-    if (!el) continue;
-    data[id] = el.type === 'checkbox' ? el.checked : el.value;
+  // Software resolved value (dropdown OR custom text when "other" picked)
+  const softwareSelect = document.getElementById('software');
+  const softwareCustom = document.getElementById('softwareCustom');
+  if (softwareSelect) {
+    data.software = softwareSelect.value === 'other'
+      ? (softwareCustom ? softwareCustom.value : '')
+      : softwareSelect.value;
   }
-  // Software: dropdown selection, with custom text when "other" is picked
-  data.software = softwareSelect.value === 'other'
-    ? (softwareCustom.value || '')
-    : softwareSelect.value;
+  // Logo + custom-template knobs
+  data.logo = getInput('logo');
+  data.customFrame = getInput('customFrame');
+  data.customBar = getInput('customBar');
+  data.cornerRadius = getInput('cornerRadius');
   return data;
 }
 
 // --- Rendering ---
 
 function onFormChange(event) {
-  // When the user types in the copyright field, capture it as the new template.
-  if (event && event.target && event.target.id === 'copyright') {
-    copyrightTemplate = event.target.value;
+  if (event && event.target) {
+    if (event.target.id === 'copyright') copyrightTemplate = event.target.value;
+    if (event.target.id === 'software') updateSoftwareCustomVisibility();
   }
   currentMetadata = readFormMetadata();
+  updateSectionCounts();
   saveSettings();
   render();
 }
@@ -612,6 +742,11 @@ async function handleExport() {
   if (!currentImage) return;
   exportBtn.disabled = true;
   exportBtn.textContent = '書き出し中...';
+  // Wait for Webfonts (Noto Sans / Noto Sans JP) to fully load before
+  // rendering — otherwise the exported JPEG may use the system fallback.
+  if (document.fonts && document.fonts.ready) {
+    try { await document.fonts.ready; } catch { /* ignore */ }
+  }
   render();
   const blob = await exportImage(previewCanvas);
   const url = URL.createObjectURL(blob);
@@ -622,6 +757,37 @@ async function handleExport() {
   URL.revokeObjectURL(url);
   exportBtn.disabled = false;
   exportBtn.textContent = '書き出し';
+}
+
+// --- Preferences reset ---
+
+function handleResetPrefs() {
+  if (!confirm('保存された設定を初期化しますか? 表示項目・著者名・現像ソフト・テンプレート設定などが既定値に戻ります。')) return;
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch { /* ignore */ }
+  copyrightTemplate = '© {year} {author}';
+  currentTemplate = 'minimal-white';
+  buildForm();
+  // Re-attach toggle listeners on freshly built sections
+  for (const section of SECTIONS) {
+    const el = document.querySelector(`details.form-section[data-section="${section.id}"]`);
+    if (el) el.addEventListener('toggle', saveSettings);
+  }
+  // Reset custom-template selectors to defaults
+  setInput('customFrame', 'none');
+  setInput('customBar', 'white');
+  setInput('cornerRadius', 'none');
+  setInput('logo', 'sony-alpha');
+  setInput('software', '');
+  setInput('softwareCustom', '');
+  updateSoftwareCustomVisibility();
+  updateTemplateUI();
+  if (currentImage) {
+    resolveCopyrightIntoForm();
+    render();
+  }
 }
 
 init();
