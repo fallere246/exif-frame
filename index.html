@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EXIF Frame</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>EXIF Frame</h1>
+      <p>写真にEXIF情報入りのフレームを付与</p>
+    </header>
+
+    <!-- Drop Zone -->
+    <div id="drop-zone" class="drop-zone">
+      <div class="drop-zone-icon">📷</div>
+      <div class="drop-zone-text"><strong>ドラッグ&ドロップ</strong>または<strong>クリック</strong>で画像を選択</div>
+      <div class="drop-zone-hint">JPEG / PNG / HEIC · 最大50MB</div>
+      <input type="file" id="file-input" accept="image/jpeg,image/png,image/heic,image/heif,.jpg,.jpeg,.png,.heic,.heif" hidden>
+    </div>
+
+    <!-- Preview & Edit -->
+    <div id="preview-section" class="preview-section hidden">
+      <!-- Preview -->
+      <div class="preview-wrapper">
+        <canvas id="preview-canvas"></canvas>
+      </div>
+
+      <!-- Template Selector -->
+      <div class="template-selector">
+        <label>テンプレート</label>
+        <button class="template-btn active" data-template="minimal-white">Minimal White</button>
+        <button class="template-btn" data-template="black-cinematic">Black Cinematic</button>
+        <button class="template-btn" data-template="side-strip">Side Strip</button>
+      </div>
+
+      <!-- Metadata Form -->
+      <div id="metadata-form" class="metadata-form">
+        <div class="form-group">
+          <label for="camera">カメラ</label>
+          <input type="text" id="camera" placeholder="Sony α7 V">
+        </div>
+        <div class="form-group">
+          <label for="lens">レンズ</label>
+          <input type="text" id="lens" placeholder="Tamron 25-200mm F2.8-5.6">
+        </div>
+        <div class="form-group">
+          <label for="focalLength">焦点距離</label>
+          <input type="text" id="focalLength" placeholder="146mm">
+        </div>
+        <div class="form-group">
+          <label for="aperture">F値</label>
+          <input type="text" id="aperture" placeholder="f/5.6">
+        </div>
+        <div class="form-group">
+          <label for="shutter">シャッター速度</label>
+          <input type="text" id="shutter" placeholder="1/160s">
+        </div>
+        <div class="form-group">
+          <label for="iso">ISO</label>
+          <input type="text" id="iso" placeholder="ISO 640">
+        </div>
+        <div class="form-group">
+          <label for="date">撮影日</label>
+          <input type="date" id="date">
+        </div>
+        <div class="form-group">
+          <label for="location">撮影地</label>
+          <input type="text" id="location" placeholder="任意">
+        </div>
+        <div class="form-group full-width">
+          <label for="author">著者名</label>
+          <input type="text" id="author" placeholder="NISHIMURA" value="NISHIMURA">
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="action-bar">
+        <button id="reset-btn" class="btn btn-secondary">リセット</button>
+        <button id="export-btn" class="btn btn-primary">書き出し</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

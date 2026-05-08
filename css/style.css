@@ -1,0 +1,275 @@
+/* === Base Reset & Variables === */
+:root {
+  --bg: #f5f5f5;
+  --surface: #ffffff;
+  --text: #1a1a1a;
+  --text-secondary: #666666;
+  --border: #e0e0e0;
+  --accent: #333333;
+  --radius: 8px;
+  --font: -apple-system, "SF Pro Display", "Inter", "Segoe UI", "Roboto", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111111;
+    --surface: #1c1c1e;
+    --text: #f0f0f0;
+    --text-secondary: #999999;
+    --border: #333333;
+    --accent: #e0e0e0;
+  }
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100dvh;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* === Layout === */
+.app {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+
+header {
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+header h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+header p {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  margin-top: 0.25rem;
+}
+
+/* === Drop Zone === */
+.drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 4rem 2rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.drop-zone:hover,
+.drop-zone.dragover {
+  border-color: var(--accent);
+  background: rgba(128, 128, 128, 0.05);
+}
+
+.drop-zone-icon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+  opacity: 0.4;
+}
+
+.drop-zone-text {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+
+.drop-zone-text strong {
+  color: var(--text);
+}
+
+.drop-zone-hint {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin-top: 0.5rem;
+}
+
+/* === Hidden === */
+.hidden {
+  display: none !important;
+}
+
+/* === Preview Section === */
+.preview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.preview-wrapper {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 1rem;
+  text-align: center;
+}
+
+.preview-wrapper canvas {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+}
+
+.loading .preview-wrapper::after {
+  content: '読み込み中...';
+  display: block;
+  padding: 4rem;
+  color: var(--text-secondary);
+}
+
+.loading canvas {
+  display: none;
+}
+
+/* === Template Selector === */
+.template-selector {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.template-selector label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  width: 100%;
+  margin-bottom: 0.25rem;
+  color: var(--text-secondary);
+}
+
+.template-btn {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.template-btn:hover {
+  border-color: var(--accent);
+}
+
+.template-btn.active {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+/* === Metadata Form === */
+.metadata-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.metadata-form .form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.metadata-form .form-group.full-width {
+  grid-column: 1 / -1;
+}
+
+.metadata-form label {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.metadata-form input {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-family: var(--font);
+  transition: border-color 0.15s;
+}
+
+.metadata-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* === Action Bar === */
+.action-bar {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+}
+
+.btn {
+  padding: 0.65rem 1.5rem;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  font-family: var(--font);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.btn-secondary {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+  border-color: var(--text-secondary);
+}
+
+/* === Responsive === */
+@media (max-width: 600px) {
+  .app {
+    padding: 1rem;
+  }
+
+  .metadata-form {
+    grid-template-columns: 1fr;
+  }
+
+  .drop-zone {
+    padding: 3rem 1.5rem;
+  }
+
+  .action-bar {
+    flex-direction: column;
+  }
+
+  .btn {
+    width: 100%;
+    text-align: center;
+  }
+}
