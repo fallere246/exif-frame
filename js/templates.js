@@ -337,10 +337,10 @@ export const templates = {
       ctx.lineWidth = Math.max(1, Math.round(h * 0.0005));
       ctx.strokeRect(padding, padding, w, h);
 
-      // Unified bar layout in the bottom area
+      // Unified bar layout — extend full canvas width (frame doesn't squeeze the bar in)
       const barY = padding + h;
       const barH = ch - barY;
-      drawBarContent(ctx, img, meta, padding, barY, w, barH, 'white');
+      drawBarContent(ctx, img, meta, 0, barY, cw, barH, 'white');
     },
   },
 
@@ -383,10 +383,10 @@ export const templates = {
       ctx.stroke();
       ctx.restore();
 
-      // Unified bar layout in the bottom blurred area
+      // Unified bar layout — extend full canvas width (frame doesn't squeeze the bar in)
       const barY = imgPad + h;
       const barH = ch - barY;
-      drawBarContent(ctx, img, meta, imgPad, barY, w, barH, 'blur');
+      drawBarContent(ctx, img, meta, 0, barY, cw, barH, 'blur');
     },
   },
 
@@ -472,10 +472,10 @@ export const templates = {
 
       ctx.drawImage(img, padding, padding, w, h);
 
-      // Unified bar layout in the bottom area
+      // Unified bar layout — extend full canvas width (frame doesn't squeeze the bar in)
       const barY = padding + h;
       const barH = ch - barY;
-      drawBarContent(ctx, img, meta, padding, barY, w, barH, 'black');
+      drawBarContent(ctx, img, meta, 0, barY, cw, barH, 'black');
     },
   },
 
@@ -631,9 +631,9 @@ export const templates = {
       ctx.stroke();
       ctx.restore();
 
-      // Unified bar layout in the bottom info area
+      // Unified bar layout — extend full card width (no inner padding on the sides)
       const infoTop = imgY + h;
-      drawBarContent(ctx, img, meta, imgX, infoTop, w, bottomH, 'white');
+      drawBarContent(ctx, img, meta, cardX, infoTop, cardW, bottomH, 'white');
     },
   },
 
@@ -663,9 +663,10 @@ export const templates = {
       drawImageMaybeRounded(ctx, img, meta, imgX, imgY, w, h, imgBg);
 
       // ── Bar ──
+      // Bar always spans full canvas width — frame doesn't pad it in.
       if (bar !== 'none') {
-        const barX = frame === 'none' ? 0 : framePad;
-        const barW = frame === 'none' ? cw : w;
+        const barX = 0;
+        const barW = cw;
         const barY = imgY + h + (frame === 'none' ? 0 : framePad);
 
         if (FRAME_BG[bar]) {

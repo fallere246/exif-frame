@@ -43,6 +43,7 @@ export const FIELDS = [
   { id: 'iso',              section: 'basic',      label: 'ISO',               editable: false, slot: SLOTS.LEFT_BOTTOM, defaultShow: true  },
   { id: 'exposureBias',     section: 'basic',      label: '露出補正',           editable: false, slot: SLOTS.LEFT_BOTTOM, defaultShow: false },
   { id: 'date',             section: 'basic',      label: '撮影日',            editable: false, slot: SLOTS.RIGHT_TOP,   defaultShow: true,  type: 'date' },
+  { id: 'location',         section: 'basic',      label: '撮影地',            editable: true,  slot: SLOTS.RIGHT_TOP,   defaultShow: false, placeholder: '任意' },
 
   // ─── 撮影パラメータ(詳細) ───────────────────────────────
   { id: 'focalLength35mm',  section: 'detailed',   label: '焦点距離(35mm換算)', editable: false, slot: SLOTS.LEFT_BOTTOM, defaultShow: false },
@@ -66,7 +67,7 @@ export const FIELDS = [
   { id: 'batteryLevel',     section: 'image',      label: 'バッテリー残量',     editable: false, slot: SLOTS.LEFT_BOTTOM, defaultShow: false },
 
   // ─── 場所 ──────────────────────────────────────────────
-  { id: 'location',         section: 'place',      label: '撮影地',            editable: true,  slot: SLOTS.RIGHT_TOP,   defaultShow: false, placeholder: '任意' },
+  // location は基本セクションへ移動済み(撮影日の隣)。GPS/標高は EXIF 自動取得のみ。
   { id: 'gps',              section: 'place',      label: 'GPS座標',           editable: false, slot: SLOTS.RIGHT_TOP,   defaultShow: false },
   { id: 'altitude',         section: 'place',      label: '標高',              editable: false, slot: SLOTS.RIGHT_TOP,   defaultShow: false },
 
