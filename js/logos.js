@@ -12,6 +12,17 @@ const LOGO_DEFS = {
     // SONY wordmark, aspect ~1280x225
     aspect: 1280 / 225,
   },
+  'pixel': {
+    src: 'assets/pixel-wordmark.png',
+    // "Pixel" wordmark, original is gray + transparent (1280×512)
+    aspect: 1280 / 512,
+  },
+  'google-g': {
+    src: 'assets/google-g.webp',
+    // Multicolor "G" — never tint, render as-is.
+    aspect: 1,
+    multicolor: true,
+  },
 };
 
 const logoCache = {};
@@ -38,19 +49,21 @@ export function drawLogo(ctx, logoKey, cx, cy, height, color) {
   const x = cx - w / 2;
   const y = cy - height / 2;
 
-  // Draw logo to offscreen canvas, then tint
+  // Multicolor logos (e.g. Google G) must keep their original colors —
+  // skip the tint pass and draw directly.
+  if (def.multicolor) {
+    ctx.drawImage(img, x, y, w, height);
+    return w;
+  }
+
+  // Draw logo to offscreen canvas, then tint with source-in composite to
+  // replace the color while preserving alpha.
   const off = new OffscreenCanvas(Math.ceil(w), Math.ceil(height));
   const octx = off.getContext('2d');
-
-  // Draw the original logo
   octx.drawImage(img, 0, 0, w, height);
-
-  // Tint: use source-in composite to replace color while keeping alpha
   octx.globalCompositeOperation = 'source-in';
   octx.fillStyle = color;
   octx.fillRect(0, 0, w, height);
-
-  // Draw tinted logo onto main canvas
   ctx.drawImage(off, x, y);
 
   return w;

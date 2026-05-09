@@ -26,6 +26,8 @@ const LOGO_OPTIONS = [
   { value: 'none',       label: 'なし (テキストのみ)' },
   { value: 'sony-alpha', label: 'Sony α' },
   { value: 'sony',       label: 'SONY' },
+  { value: 'pixel',      label: 'Pixel' },
+  { value: 'google-g',   label: 'Google G (カラー)' },
 ];
 
 const PRESERVE = new Set(['author']);  // values kept across photo loads
