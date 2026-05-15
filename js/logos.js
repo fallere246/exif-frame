@@ -23,6 +23,26 @@ const LOGO_DEFS = {
     aspect: 1,
     multicolor: true,
   },
+  'apple': {
+    src: 'assets/apple.svg',
+    // Apple silhouette, single-color (814×1000, vertical orientation)
+    aspect: 814 / 1000,
+  },
+  'olympus': {
+    src: 'assets/olympus.png',
+    // OLYMPUS wordmark cropped to remove the huge transparent padding (2400×700)
+    aspect: 2400 / 700,
+  },
+  'om-system': {
+    src: 'assets/om-system.png',
+    // OM SYSTEM logo with surrounding frame (1000×1000)
+    aspect: 1,
+  },
+  'insta360': {
+    src: 'assets/insta360.svg',
+    // Insta360 wordmark + circular emblem (2567.6×777.2)
+    aspect: 2567.6 / 777.2,
+  },
 };
 
 const logoCache = {};

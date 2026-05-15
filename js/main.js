@@ -28,6 +28,10 @@ const LOGO_OPTIONS = [
   { value: 'sony',       label: 'SONY' },
   { value: 'pixel',      label: 'Pixel' },
   { value: 'google-g',   label: 'Google G (カラー)' },
+  { value: 'apple',      label: 'Apple' },
+  { value: 'olympus',    label: 'OLYMPUS' },
+  { value: 'om-system',  label: 'OM SYSTEM' },
+  { value: 'insta360',   label: 'Insta360' },
 ];
 
 const PRESERVE = new Set(['author']);  // values kept across photo loads
